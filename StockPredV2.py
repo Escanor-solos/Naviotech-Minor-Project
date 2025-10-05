@@ -4,7 +4,7 @@ import pandas_ta as ta
 import numpy as np
 from sklearn.preprocessing import MinMaxScaler
 from sklearn.model_selection import TimeSeriesSplit
-from sklearn.metrics import mean_absolute_error, mean_squared_error
+from sklearn.metrics import mean_squared_error, mean_absolute_error
 import tensorflow as tf
 from tensorflow.keras.models import Sequential
 from tensorflow.keras.layers import GRU, Dense, Dropout, Bidirectional, Conv1D, MaxPooling1D
@@ -12,244 +12,200 @@ from tensorflow.keras.callbacks import EarlyStopping
 import matplotlib.pyplot as plt
 import joblib
 
-# ==============================================================================
+# ============================================================================== 
 # CONFIGURATION PARAMETERS
-# ==============================================================================
-TICKER_SYMBOL = "AAPL"
-START_DATE = "2015-01-01"
-END_DATE = "2023-12-31"
-SEQUENCE_LENGTH = 63
+# ============================================================================== 
+SEQUENCE_LENGTH = 50
 N_SPLITS = 5
 PATIENCE = 10
 MODEL_SAVE_PATH = 'stock_gru_model.keras'
 SCALER_SAVE_PATH = 'stock_scalers.joblib'
+SCALER_WINDOW = 504
 
-# ==============================================================================
+# ============================================================================== 
 # HELPER FUNCTIONS
-# ==============================================================================
+# ============================================================================== 
 def create_model(input_shape):
     """Creates the Conv1D + 2-Layer Bidirectional GRU model."""
     model = Sequential([
-        Conv1D(filters=64, kernel_size=3, activation='relu', input_shape=input_shape),
-        MaxPooling1D(pool_size=2),
-        Bidirectional(GRU(units=50, return_sequences=True, kernel_regularizer=tf.keras.regularizers.l2(0.001))),
-        Dropout(0.35),
-        Bidirectional(GRU(units=50, return_sequences=False, kernel_regularizer=tf.keras.regularizers.l2(0.001))),
-        Dropout(0.35),
-        Dense(units=25),
-        Dense(units=1)
+        Conv1D(64, 3, activation='relu', input_shape=input_shape),
+        MaxPooling1D(2),
+        Bidirectional(GRU(50, return_sequences=True, kernel_regularizer=tf.keras.regularizers.l2(0.001))),
+        Dropout(0.25),
+        Bidirectional(GRU(50, return_sequences=False, kernel_regularizer=tf.keras.regularizers.l2(0.001))),
+        Dropout(0.25),
+        Dense(25),
+        Dense(1)
     ])
-    
-    optimizer = tf.keras.optimizers.Adam(learning_rate=0.0005)
-    model.compile(optimizer=optimizer, loss='mean_squared_error')
+    model.compile(optimizer=tf.keras.optimizers.Adam(0.0005), loss='mean_squared_error')
     return model
 
-def create_sequences(features, target, seq_length):
+def create_sequences(features, target, seq_len):
     """Converts time series data into sequences for the model."""
     X, y = [], []
-    for i in range(seq_length, len(features)):
-        X.append(features[i-seq_length:i])
+    for i in range(seq_len, len(features)):
+        X.append(features[i-seq_len:i])
         y.append(target[i, 0])
     return np.array(X), np.array(y)
 
-def predict_next_day(df_full, feature_cols, seq_len, model_path, scaler_path):
-    """Predicts the stock price for the next trading day using the last sequence of data."""
-    try:
-        model = tf.keras.models.load_model(model_path)
-        scalers = joblib.load(scaler_path)
-        feature_scaler = scalers['feature_scaler']
-        target_scaler = scalers['target_scaler']
-        
-        last_data = df_full[feature_cols].tail(seq_len)
-        
-        last_date = last_data.index[-1]
-        next_date = last_date + pd.Timedelta(days=1)
-        while next_date.dayofweek > 4: # Skip weekend
-            next_date += pd.Timedelta(days=1)
-        
-        print(f"\n--- Interactive Next-Day Prediction ---")
-        print(f"Using historical data up to: {last_date.strftime('%Y-%m-%d')}")
-        print(f"Predicting price for: {next_date.strftime('%Y-%m-%d')} (Approx. Next Trading Day)")
-        
-        scaled_data = feature_scaler.transform(last_data.values)
-        X_predict = np.expand_dims(scaled_data, axis=0)
-        
-        predicted_scaled = model.predict(X_predict, verbose=0)
-        predicted_price = target_scaler.inverse_transform(predicted_scaled)[0][0]
-        
-        print(f"\nPredicted Close Price for {TICKER_SYMBOL}: ${predicted_price:.2f}")
-
-    except Exception as e:
-        print(f"\nAn error occurred during prediction: {e}")
-        print("Please ensure the model and scalers were saved successfully.")
-
-
-# ==============================================================================
-# MAIN EXECUTION SCRIPT
-# ==============================================================================
-if __name__ == "__main__":
-    
-    # --- 1. Data Collection and Preprocessing ---
-    print(f"Downloading stock price data for {TICKER_SYMBOL}...")
-    df = yf.download(TICKER_SYMBOL, start=START_DATE, end=END_DATE)
-
-    print(f"Downloading VIX Volatility Index data...")
-    df_vix = yf.download('^VIX', start=START_DATE, end=END_DATE)
-    
-    if isinstance(df.columns, pd.MultiIndex):
-        df.columns = df.columns.get_level_values(0)
-    print("Data downloaded and columns flattened successfully!")
-
-    if isinstance(df_vix.columns, pd.MultiIndex):
-        df_vix.columns = df_vix.columns.get_level_values(0)
-    df_vix = df_vix[['Close']].rename(columns={'Close': 'VIX_Close'})
-    df = df.join(df_vix, how='left')
-    df.fillna(method='ffill', inplace=True)
-    df.fillna(method='bfill', inplace=True)
-
-    # --- 2. Feature Engineering ---
-    print("\nAdding technical indicators...")
+def prepare_features(df):
+    """Adds technical indicators, returns, and other features."""
     df.ta.rsi(close='Close', length=14, append=True)
     df.ta.macd(close='Close', fast=12, slow=26, signal=9, append=True)
     df.ta.bbands(close='Close', length=20, append=True)
     df.ta.atr(length=14, append=True)
     df.ta.roc(close='Close', length=20, append=True)
-    df['MA_200'] = df['Close'].rolling(window=200).mean()
+    df['MA_200'] = df['Close'].rolling(200).mean()
     df['Dist_from_MA200'] = df['Close'] / df['MA_200']
-    df['ATR_MA'] = df['ATRr_14'].rolling(window=50).mean()
+    df['ATR_MA'] = df['ATRr_14'].rolling(50).mean()
     df['ATR_Ratio'] = df['ATRr_14'] / df['ATR_MA']
     df['Is_Monday'] = (df.index.dayofweek == 0).astype(int)
 
-    df.dropna(inplace=True)
-    print(f"Data shape after feature engineering: {df.shape}")
+    # Short-term lagged returns
+    df['Return_1'] = df['Close'].pct_change(1)
+    df['Return_2'] = df['Close'].pct_change(2)
+    df['Return_3'] = df['Close'].pct_change(3)
+    df['Return_5'] = df['Close'].pct_change(5)
+    df['Return_10'] = df['Close'].pct_change(10)
 
-    feature_columns = [
-        'Close', 'Volume', 'VIX_Close', 'RSI_14', 'MACDh_12_26_9', 
-        'BBL_20_2.0', 'BBU_20_2.0', 'ATRr_14', 'ROC_20', 
-        'Dist_from_MA200', 'ATR_Ratio', 'Is_Monday'
-    ]
-    target_column = 'Close'
+    df['EMA_20'] = df['Close'].ewm(span=20, adjust=False).mean()
+    df['EMA_50'] = df['Close'].ewm(span=50, adjust=False).mean()
 
-    existing_feature_columns = [col for col in feature_columns if col in df.columns]
-    print("\nUsing features:", existing_feature_columns)
-    
-    features = df[existing_feature_columns].values
-    target = df[target_column].values.reshape(-1, 1)
-    
-    # --- 3. Walk-Forward Validation and Model Training ---
-    tscv = TimeSeriesSplit(n_splits=N_SPLITS)
-    rmse_scores, mae_scores = [], []
-    
-    final_model = None
-    final_feature_scaler = None
-    final_target_scaler = None
+    # Stochastic Oscillator
+    if all(col in df.columns for col in ['High','Low','Close']):
+        stoch = ta.stoch(df['High'], df['Low'], df['Close'], k=14, d=3)
+        for col in ['STOCHk_14_3','STOCHd_14_3']:
+            if col in stoch.columns:
+                df[col] = stoch[col]
 
-    print(f"\nStarting Walk-Forward Validation with {N_SPLITS} splits...")
+    # On-Balance Volume
+    if 'Close' in df.columns and 'Volume' in df.columns:
+        df['OBV'] = ta.obv(df['Close'], df['Volume'])
 
-    for fold, (train_indices, test_indices) in enumerate(tscv.split(features)):
-        print(f"\n===== FOLD {fold + 1}/{N_SPLITS} =====")
-        
-        train_features, test_features = features[train_indices], features[test_indices]
-        train_target, test_target = target[train_indices], target[test_indices]
+    df.ffill(inplace=True)
+    df.bfill(inplace=True)
+    return df
 
-        feature_scaler = MinMaxScaler(feature_range=(0, 1))
-        train_features_scaled = feature_scaler.fit_transform(train_features)
-        test_features_scaled = feature_scaler.transform(test_features)
-        
-        target_scaler = MinMaxScaler(feature_range=(0, 1))
-        train_target_scaled = target_scaler.fit_transform(train_target)
-        test_target_scaled_for_metrics = target_scaler.transform(test_target)
-        
-        X_train, y_train = create_sequences(train_features_scaled, train_target_scaled, SEQUENCE_LENGTH)
-        X_test, y_test = create_sequences(test_features_scaled, test_target_scaled_for_metrics, SEQUENCE_LENGTH)
-        
-        print(f"Training on {len(X_train)} samples, testing on {len(X_test)} samples.")
-        
-        model = create_model(input_shape=(X_train.shape[1], X_train.shape[2]))
-        
-        early_stopping = EarlyStopping(monitor='loss', patience=PATIENCE, restore_best_weights=True)
-        
-        history = model.fit(
-            X_train, y_train, batch_size=32, epochs=100,
-            callbacks=[early_stopping], verbose=1
-        )
-        
-        predicted_scaled = model.predict(X_test)
-        predicted = target_scaler.inverse_transform(predicted_scaled)
-        actual = target_scaler.inverse_transform(y_test.reshape(-1, 1))
-        
-        rmse = np.sqrt(mean_squared_error(actual, predicted))
-        mae = mean_absolute_error(actual, predicted)
-        rmse_scores.append(rmse)
-        mae_scores.append(mae)
-        
-        print(f"Fold {fold + 1} RMSE: ${rmse:.2f}, MAE: ${mae:.2f}")
+def predict_next_day(df_full, feature_cols, seq_len, model_path, scaler_window=SCALER_WINDOW):
+    """Predicts the stock price for the next trading day using rolling scaler."""
+    model = tf.keras.models.load_model(model_path)
+    recent_data = df_full[feature_cols].tail(scaler_window)
+    feature_scaler = MinMaxScaler()
+    feature_scaler.fit(recent_data.values)
+    target_scaler = MinMaxScaler()
+    target_scaler.fit(df_full['Close'].tail(scaler_window).values.reshape(-1,1))
+    last_data = df_full[feature_cols].tail(seq_len)
+    scaled_data = feature_scaler.transform(last_data.values)
+    X_pred = np.expand_dims(scaled_data, axis=0)
+    pred_scaled = model.predict(X_pred, verbose=0)
+    predicted_price = target_scaler.inverse_transform(pred_scaled)[0][0]
+    return predicted_price
 
-        if fold == N_SPLITS - 1:
-            final_actual_prices = actual
-            final_predicted_prices = predicted
-            final_fold_dates = df.index[test_indices][SEQUENCE_LENGTH:]
-            
-            final_model = model
-            final_feature_scaler = feature_scaler
-            final_target_scaler = target_scaler
-            
-            print(f"\nSaving final model to {MODEL_SAVE_PATH}...")
-            final_model.save(MODEL_SAVE_PATH)
-            joblib.dump({
-                'feature_scaler': final_feature_scaler,
-                'target_scaler': final_target_scaler,
-                'feature_columns': existing_feature_columns
-            }, SCALER_SAVE_PATH)
-            print(f"Model and scalers saved successfully.")
-            
-    # --- 4. Final Results and Visualization ---
-    print("\n--- Walk-Forward Validation Summary ---")
-    for i, rmse in enumerate(rmse_scores):
-        print(f"Fold {i+1}: RMSE = ${rmse:.2f}, MAE = ${mae_scores[i]:.2f}")
+# ============================================================================== 
+# MAIN EXECUTION SCRIPT
+# ============================================================================== 
+if __name__ == "__main__":
+    stock_list = ["AMD"]
+    for TICKER in stock_list:
+        print(f"\nDownloading stock price data for {TICKER}...")
+        df = yf.download(TICKER, start="2015-01-01")
+        df_vix = yf.download('^VIX', start="2015-01-01")
 
-    print(f"\nAverage RMSE across all folds: ${np.mean(rmse_scores):.2f}")
-    print(f"Average MAE across all folds: ${np.mean(mae_scores):.2f}")
-    print("---------------------------------------")
+        if isinstance(df.columns, pd.MultiIndex):
+            df.columns = df.columns.get_level_values(0)
+        if isinstance(df_vix.columns, pd.MultiIndex):
+            df_vix.columns = df_vix.columns.get_level_values(0)
 
-    print("\nVisualizing predictions for the final fold...")
-    plt.figure(figsize=(14, 6))
-    plt.plot(final_fold_dates, final_actual_prices, color='blue', label=f'Actual {TICKER_SYMBOL} Price')
-    plt.plot(final_fold_dates, final_predicted_prices, color='red', label=f'Predicted {TICKER_SYMBOL} Price')
-    plt.title(f'{TICKER_SYMBOL} Stock Price Prediction (Final Fold)')
-    plt.xlabel('Date')
-    plt.ylabel(f'{TICKER_SYMBOL} Stock Price (USD)')
-    plt.legend()
-    plt.show()
-    
-    # --- 5. Interactive Next-Day Prediction ---
-    print(f"\nRe-downloading full data for interactive prediction...")
-    current_df = yf.download(TICKER_SYMBOL, start=START_DATE)
-    current_vix = yf.download('^VIX', start=START_DATE)
+        df_vix = df_vix[['Close']].rename(columns={'Close':'VIX_Close'})
+        df = df.join(df_vix, how='left')
+        df.ffill(inplace=True)
+        df.bfill(inplace=True)
 
-    if isinstance(current_df.columns, pd.MultiIndex): current_df.columns = current_df.columns.get_level_values(0)
-    if isinstance(current_vix.columns, pd.MultiIndex): current_vix.columns = current_vix.columns.get_level_values(0)
-    current_vix = current_vix[['Close']].rename(columns={'Close': 'VIX_Close'})
-    current_df = current_df.join(current_vix, how='left')
-    current_df.fillna(method='ffill', inplace=True)
-    current_df.fillna(method='bfill', inplace=True)
+        required_cols = ['Close','High','Low','Volume']
+        if all(col in df.columns for col in required_cols):
+            df = prepare_features(df)
+        else:
+            print(f"Skipping {TICKER}, missing required columns for indicators.")
+            continue
 
-    current_df.ta.rsi(close='Close', length=14, append=True)
-    current_df.ta.macd(close='Close', fast=12, slow=26, signal=9, append=True)
-    current_df.ta.bbands(close='Close', length=20, append=True)
-    current_df.ta.atr(length=14, append=True)
-    current_df.ta.roc(close='Close', length=20, append=True)
-    current_df['MA_200'] = current_df['Close'].rolling(window=200).mean()
-    current_df['Dist_from_MA200'] = current_df['Close'] / current_df['MA_200']
-    current_df['ATR_MA'] = current_df['ATRr_14'].rolling(window=50).mean()
-    current_df['ATR_Ratio'] = current_df['ATRr_14'] / current_df['ATR_MA']
-    current_df['Is_Monday'] = (current_df.index.dayofweek == 0).astype(int)
-    current_df.dropna(inplace=True)
+        feature_cols = ['Close','Volume','VIX_Close','RSI_14','MACDh_12_26_9',
+                        'BBL_20_2.0','BBU_20_2.0','ATRr_14','ROC_20',
+                        'Dist_from_MA200','ATR_Ratio','Is_Monday',
+                        'Return_1','Return_2','Return_3','Return_5','Return_10',
+                        'EMA_20','EMA_50','STOCHk_14_3','STOCHd_14_3','OBV']
+        feature_cols = [col for col in feature_cols if col in df.columns]
 
-    predict_next_day(
-        df_full=current_df, 
-        feature_cols=existing_feature_columns, 
-        seq_len=SEQUENCE_LENGTH, 
-        model_path=MODEL_SAVE_PATH, 
-        scaler_path=SCALER_SAVE_PATH
-    )
+        features = df[feature_cols].values
+        target = df['Close'].values.reshape(-1,1)
+
+        tscv = TimeSeriesSplit(n_splits=N_SPLITS)
+        rmse_scores, mae_scores = [], []
+        final_model = None
+        final_feature_scaler = None
+        final_target_scaler = None
+
+        print(f"\nStarting Walk-Forward Validation for {TICKER} with {N_SPLITS} splits...")
+
+        for fold, (train_idx, test_idx) in enumerate(tscv.split(features)):
+            print(f"\n===== FOLD {fold + 1}/{N_SPLITS} =====")
+            train_X, test_X = features[train_idx], features[test_idx]
+            train_y, test_y = target[train_idx], target[test_idx]
+
+            feature_scaler = MinMaxScaler()
+            train_X_scaled = feature_scaler.fit_transform(train_X)
+            test_X_scaled = feature_scaler.transform(test_X)
+
+            target_scaler = MinMaxScaler()
+            train_y_scaled = target_scaler.fit_transform(train_y)
+            test_y_scaled = target_scaler.transform(test_y)
+
+            X_train_seq, y_train_seq = create_sequences(train_X_scaled, train_y_scaled, SEQUENCE_LENGTH)
+            X_test_seq, y_test_seq = create_sequences(test_X_scaled, test_y_scaled, SEQUENCE_LENGTH)
+
+            print(f"Training on {len(X_train_seq)} samples, testing on {len(X_test_seq)} samples.")
+            model = create_model((X_train_seq.shape[1], X_train_seq.shape[2]))
+            early_stop = EarlyStopping(monitor='loss', patience=PATIENCE, restore_best_weights=True)
+            model.fit(X_train_seq, y_train_seq, batch_size=32, epochs=100, callbacks=[early_stop], verbose=1)
+
+            pred_scaled = model.predict(X_test_seq)
+            pred = target_scaler.inverse_transform(pred_scaled)
+            actual = target_scaler.inverse_transform(y_test_seq.reshape(-1,1))
+
+            rmse = np.sqrt(mean_squared_error(actual, pred))
+            mae = mean_absolute_error(actual, pred)
+            rmse_scores.append(rmse)
+            mae_scores.append(mae)
+            print(f"Fold {fold+1} RMSE: ${rmse:.2f}, MAE: ${mae:.2f}")
+
+            if fold == N_SPLITS-1:
+                final_model = model
+                final_feature_scaler = feature_scaler
+                final_target_scaler = target_scaler
+                final_actual_prices = actual
+                final_predicted_prices = pred
+                final_fold_dates = df.index[test_idx][SEQUENCE_LENGTH:]
+
+        # --- Plot final fold predictions ---
+        print(f"\nVisualizing predictions for the final fold of {TICKER}...")
+        plt.figure(figsize=(14,6))
+        plt.plot(final_fold_dates, final_actual_prices, color='blue', label='Actual')
+        plt.plot(final_fold_dates, final_predicted_prices, color='red', label='Predicted')
+        plt.title(f'{TICKER} Stock Price Prediction (Final Fold)')
+        plt.xlabel('Date')
+        plt.ylabel(f'{TICKER} Stock Price (USD)')
+        plt.legend()
+        plt.show()
+
+        # --- Save final model and scalers ---
+        print(f"\nSaving final model and scalers for {TICKER}...")
+        final_model.save(MODEL_SAVE_PATH)
+        joblib.dump({
+            'feature_scaler': final_feature_scaler,
+            'target_scaler': final_target_scaler,
+            'feature_columns': feature_cols
+        }, SCALER_SAVE_PATH)
+        print("Saved successfully.")
+
+        # --- Next-Day Prediction ---
+        next_price = predict_next_day(df, feature_cols, SEQUENCE_LENGTH, MODEL_SAVE_PATH)
+        print(f"\nPredicted Next-Day Close for {TICKER}: ${next_price:.2f}")
