@@ -1,7 +1,9 @@
 # Naviotech-Minor-Project
-<br>
-# AI Stock Price Predictor<br>
-THE MODEL HAS TO BE TRAINED ON THE STOCK TO BE ABLE TO PREDICT THE NEXT TRADING DAY CLOSE<br>
+
+# AI Stock Price Predictor
+
+THE MODEL HAS TO BE TRAINED ON THE STOCK TO BE ABLE TO PREDICT THE NEXT TRADING DAY CLOSE
+
 A Python script that uses a sophisticated Conv1D + Bidirectional GRU (Gated Recurrent Unit) neural network to predict future stock prices. The model is trained on historical price data and a rich set of technical and external indicators.
 
 ## Description
